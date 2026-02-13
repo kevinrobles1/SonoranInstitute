@@ -1,0 +1,22 @@
+# local data
+data/*.xlsx
+data/*.csv
+data/*.parquet
+
+# outputs
+*_CLEANED.xlsx
+staging_new_entries.xlsx
+trash_export.csv
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# streamlit secrets
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
