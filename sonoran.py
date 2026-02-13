@@ -1,9 +1,14 @@
-# streamlit run app.py
+from __future__ import annotations
+
 import os
 import re
+import sys
 import tempfile
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, date
+from pathlib import Path
+from typing import Optional, Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -12,55 +17,52 @@ import streamlit as st
 from openpyxl import load_workbook
 
 
-# -----------------------------
-# Settings (match your project)
-# -----------------------------
-INPUT_XLSX = r"C:\Users\roble\OneDrive\Documents\Sonoran Institute\Data\Trash database.xlsx"
-OUTPUT_XLSX = r"C:\Users\roble\OneDrive\Documents\Sonoran Institute\Data\Trash database_CLEANED.xlsx"
-OVERRIDES_CSV = r"C:\Users\roble\OneDrive\Documents\Sonoran Institute\Data\site_overrides.csv"
-
-# Put your big cleaning script in this file (same folder as app.py)
-CLEAN_SCRIPT = "clean_trash_db.py"
-
+# =============================
+# App identity
+# =============================
 LOGO_URL = "https://sonoraninstitute.org/wp-content/themes/sonoran-institute-2016/assets/img/si_logo_2018.png"
+PLOTLY_CONFIG = {"displaylogo": False}
 
 st.set_page_config(page_title="Trash Dashboard", page_icon="🗑️", layout="wide")
 
 
-# -----------------------------
-# Streamlit compat wrappers (new width arg + old use_container_width)
-# -----------------------------
-PLOTLY_CONFIG = {"displaylogo": False}
+# =============================
+# Settings (env vars + defaults)
+# =============================
+@dataclass(frozen=True)
+class Settings:
+    input_xlsx: str
+    output_xlsx: str
+    overrides_csv: str
+    clean_module: str
+    sample_xlsx: str
 
 
-def st_df(df, height=420):
-    try:
-        st.dataframe(df, width="stretch", height=height)
-    except TypeError:
-        st.dataframe(df, use_container_width=True, height=height)
+def get_settings() -> Settings:
+    base = Path(__file__).resolve().parent
+
+    def env_or(key: str, default: str) -> str:
+        v = os.getenv(key, "").strip()
+        return v if v else default
+
+    sample_xlsx = str(base / "data" / "sample_trash.xlsx")
+
+    return Settings(
+        input_xlsx=env_or("TRASH_INPUT_XLSX", sample_xlsx),
+        output_xlsx=env_or("TRASH_OUTPUT_XLSX", str(base / "data" / "sample_trash_CLEANED.xlsx")),
+        overrides_csv=env_or("TRASH_OVERRIDES_CSV", str(base / "data" / "site_overrides.csv")),
+        clean_module=env_or("TRASH_CLEAN_MODULE", "scripts.clean_trash_db"),
+        sample_xlsx=sample_xlsx,
+    )
 
 
-def st_chart(fig, height=None):
-    if height is not None:
-        fig.update_layout(height=height)
-    try:
-        st.plotly_chart(fig, config=PLOTLY_CONFIG, width="stretch")
-    except TypeError:
-        st.plotly_chart(fig, config=PLOTLY_CONFIG, use_container_width=True)
+SETTINGS = get_settings()
 
 
-def st_sidebar_image(url):
-    # Keep it small and only in sidebar
-    try:
-        st.sidebar.image(url, width=170)
-    except TypeError:
-        st.sidebar.image(url, use_container_width=True)
-
-
-# -----------------------------
-# Styling (Times New Roman)
-# -----------------------------
-def inject_css():
+# =============================
+# UI helpers
+# =============================
+def inject_css_times_new_roman() -> None:
     st.markdown(
         """
         <style>
@@ -73,9 +75,32 @@ def inject_css():
     )
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
+def st_df(df: pd.DataFrame, height: int = 420) -> None:
+    try:
+        st.dataframe(df, width="stretch", height=height)
+    except TypeError:
+        st.dataframe(df, use_container_width=True, height=height)
+
+
+def st_chart(fig, height: Optional[int] = None) -> None:
+    if height is not None:
+        fig.update_layout(height=height)
+    try:
+        st.plotly_chart(fig, config=PLOTLY_CONFIG, width="stretch")
+    except TypeError:
+        st.plotly_chart(fig, config=PLOTLY_CONFIG, use_container_width=True)
+
+
+def st_sidebar_logo(url: str) -> None:
+    try:
+        st.sidebar.image(url, width=170)
+    except TypeError:
+        st.sidebar.image(url, use_container_width=True)
+
+
+# =============================
+# General helpers
+# =============================
 def get_mtime(path: str) -> float:
     try:
         return os.path.getmtime(path)
@@ -83,7 +108,7 @@ def get_mtime(path: str) -> float:
         return 0.0
 
 
-def normalize_event_id(x):
+def normalize_event_id(x: Any) -> Optional[str]:
     if pd.isna(x):
         return None
     s = str(x).strip()
@@ -94,10 +119,10 @@ def normalize_event_id(x):
     return s
 
 
-def parse_date_val(val):
-    # Handles yymmdd, yyyymmdd, Excel-like values, and normal date strings
+def parse_date_val(val: Any) -> pd.Timestamp:
     if pd.isna(val):
         return pd.NaT
+
     if isinstance(val, (datetime, pd.Timestamp)):
         return pd.to_datetime(val, errors="coerce")
 
@@ -116,7 +141,7 @@ def parse_date_val(val):
     return pd.to_datetime(s, errors="coerce")
 
 
-def pick_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+def pick_first_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     cols = set(df.columns)
     for c in candidates:
         if c in cols:
@@ -124,8 +149,7 @@ def pick_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-def multi_to_group_item(col):
-    # col is usually a tuple (top, sub) from a 2-row Excel header
+def multi_to_group_item(col: Any) -> Tuple[str, str]:
     if not isinstance(col, tuple) or len(col) != 2:
         return "Ungrouped", str(col)
 
@@ -142,56 +166,71 @@ def multi_to_group_item(col):
     return group, item
 
 
-def looks_like_timedelta_text(x) -> bool:
+def looks_like_timedelta_text(x: Any) -> bool:
     if pd.isna(x):
         return False
     return ("day" in str(x)) or isinstance(x, pd.Timedelta)
 
 
-def find_candidate_workbooks() -> list[str]:
-    base = os.path.dirname(os.path.abspath(__file__))
-    candidates = []
+def find_candidate_workbooks() -> List[str]:
+    base = Path(__file__).resolve().parent
+    candidates: List[str] = []
 
     obvious = [
-        OUTPUT_XLSX,
-        INPUT_XLSX,
-        os.path.join(base, "Trash database_CLEANED.xlsx"),
-        os.path.join(base, "Trash database.xlsx"),
-        os.path.join(base, "Data here", "Trash database.xlsx"),
-        os.path.join(base, "Data here", "Trash database_CLEANED.xlsx"),
+        SETTINGS.output_xlsx,
+        SETTINGS.input_xlsx,
+        str(base / "Trash database_CLEANED.xlsx"),
+        str(base / "Trash database.xlsx"),
+        str(base / "data" / "Trash database.xlsx"),
+        str(base / "data" / "Trash database_CLEANED.xlsx"),
+        str(base / "data" / "sample_trash.xlsx"),
+        str(base / "data" / "sample_trash_CLEANED.xlsx"),
     ]
+
     for p in obvious:
         if p and os.path.exists(p) and p not in candidates:
             candidates.append(p)
 
-    # also scan current folder and "Data here"
-    for root in [base, os.path.join(base, "Data here")]:
-        if os.path.isdir(root):
-            for fn in os.listdir(root):
-                if fn.lower().endswith(".xlsx"):
-                    full = os.path.join(root, fn)
-                    if full not in candidates:
-                        candidates.append(full)
+    for root in [base, base / "data"]:
+        if root.is_dir():
+            for fn in root.iterdir():
+                if fn.is_file() and fn.name.lower().endswith(".xlsx"):
+                    fp = str(fn)
+                    if fp not in candidates:
+                        candidates.append(fp)
 
     return candidates
 
 
-def workbook_has_sheet(path: str, sheet_name: str) -> bool:
+# =============================
+# Sample workbook creation
+# =============================
+def create_sample_if_missing() -> None:
+    """
+    Generates a fake workbook if data/sample_trash.xlsx does not exist.
+    This keeps the repo runnable without any private data.
+    """
+    sample_path = Path(SETTINGS.sample_xlsx)
+    if sample_path.exists():
+        return
+
     try:
-        xls = pd.ExcelFile(path)
-        return sheet_name in xls.sheet_names
-    except Exception:
-        return False
+        from scripts.make_sample_workbook import create_sample_workbook  # type: ignore
+    except Exception as e:
+        st.error("Could not import scripts/make_sample_workbook.py")
+        st.write(str(e))
+        return
+
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    create_sample_workbook(str(sample_path))
 
 
+# =============================
+# Plot-column builder for cleaned long table
+# =============================
 def build_plot_columns_for_clean_long(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    This stops your KeyError problem.
-    If date_plot/lat_plot/lon_plot do not exist, build them from the best columns available.
-    """
     out = df.copy()
 
-    # event_id
     if "event_id" in out.columns:
         out["event_id"] = out["event_id"].apply(normalize_event_id)
     elif "Event ID" in out.columns:
@@ -199,17 +238,12 @@ def build_plot_columns_for_clean_long(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["event_id"] = None
 
-    # date_plot
     if "date_plot" not in out.columns:
         date_src = pick_first_col(out, ["date_resolved", "date_data", "date_site", "date", "Date"])
-        if date_src:
-            out["date_plot"] = out[date_src].apply(parse_date_val)
-        else:
-            out["date_plot"] = pd.NaT
+        out["date_plot"] = out[date_src].apply(parse_date_val) if date_src else pd.NaT
     else:
         out["date_plot"] = out["date_plot"].apply(parse_date_val)
 
-    # lat_plot, lon_plot
     if "lat_plot" not in out.columns:
         lat_src = pick_first_col(out, ["lat", "lat_raw", "Latitude", "Lat"])
         out["lat_plot"] = pd.to_numeric(out[lat_src], errors="coerce") if lat_src else np.nan
@@ -222,14 +256,9 @@ def build_plot_columns_for_clean_long(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["lon_plot"] = pd.to_numeric(out["lon_plot"], errors="coerce")
 
-    # site label for plots
     if "site_label_plot" not in out.columns:
         label_src = pick_first_col(out, ["site_label", "Site", "location_description"])
-        if label_src:
-            out["site_label_plot"] = out[label_src].fillna("").astype(str).str.strip()
-        else:
-            out["site_label_plot"] = ""
-
+        out["site_label_plot"] = out[label_src].fillna("").astype(str).str.strip() if label_src else ""
         empty = out["site_label_plot"].eq("")
         out.loc[empty, "site_label_plot"] = out.loc[empty, "event_id"].apply(
             lambda x: f"unknown (event {x})" if x else "unknown"
@@ -237,7 +266,6 @@ def build_plot_columns_for_clean_long(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["site_label_plot"] = out["site_label_plot"].fillna("").astype(str).str.strip()
 
-    # counts for charts
     if "count_for_totals" not in out.columns:
         if "count_clean" in out.columns:
             out["count_for_totals"] = pd.to_numeric(out["count_clean"], errors="coerce").fillna(0).astype(float)
@@ -253,32 +281,22 @@ def build_plot_columns_for_clean_long(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# -----------------------------
-# Loading logic (supports cleaned OR raw)
-# -----------------------------
+# =============================
+# Workbook loader (raw or cleaned)
+# =============================
 @st.cache_data(show_spinner=False)
 def load_workbook_any(workbook_path: str, workbook_mtime: float):
-    """
-    Returns:
-      mode: "cleaned" or "raw"
-      events_df: event-level
-      long_df: long format (always has count_for_totals + date_plot + site_label_plot)
-      site_df: optional site table
-      meta: dict with sheets and timestamps
-      extras: dict with qc_report, needs_fixes, events_clean, clean_long (when present)
-    """
     xls = pd.ExcelFile(workbook_path)
     sheets = xls.sheet_names
     meta = {"sheets": sheets}
 
-    extras = {
+    extras: Dict[str, Any] = {
         "qc_report": None,
         "needs_fixes": None,
         "events_clean": None,
         "clean_long": None,
     }
 
-    # If cleaned tables exist, use them
     if ("Clean_Long" in sheets) and ("Events_clean" in sheets):
         mode = "cleaned"
         clean_long = pd.read_excel(workbook_path, sheet_name="Clean_Long")
@@ -292,16 +310,13 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
         if "Needs_Fixes" in sheets:
             extras["needs_fixes"] = pd.read_excel(workbook_path, sheet_name="Needs_Fixes")
 
-        # Make sure plot columns exist
         long_df = build_plot_columns_for_clean_long(clean_long)
 
-        # Standardize group/item columns if needed
         if "trash_group" not in long_df.columns and "Trash group" in long_df.columns:
             long_df["trash_group"] = long_df["Trash group"]
         if "trash_item" not in long_df.columns and "Trash item" in long_df.columns:
             long_df["trash_item"] = long_df["Trash item"]
 
-        # Events view
         events_df = long_df[["event_id", "date_plot"]].drop_duplicates().copy()
         if "surveyed_m2" in long_df.columns:
             tmp = long_df[["event_id", "surveyed_m2"]].drop_duplicates()
@@ -309,7 +324,6 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
         else:
             events_df["surveyed_m2"] = np.nan
 
-        # Site label
         tmp2 = long_df[["event_id", "site_label_plot"]].drop_duplicates()
         events_df = events_df.merge(tmp2, on="event_id", how="left")
 
@@ -322,11 +336,10 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
 
         return mode, events_df, long_df, site_df, meta, extras
 
-    # Else: raw workbook mode (Data + Site parsing like your old app)
     mode = "raw"
 
     if "Data" not in sheets:
-        raise ValueError("Workbook is missing a sheet named 'Data' and also has no Clean_Long.")
+        raise ValueError("Workbook missing 'Data' and missing cleaned sheets (Clean_Long, Events_clean).")
 
     df_raw = pd.read_excel(workbook_path, sheet_name="Data", header=[0, 1])
 
@@ -337,7 +350,7 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
         "surveyed m^2": "surveyed_m2_raw",
     }
 
-    base_cols = {}
+    base_cols: Dict[Any, str] = {}
     for col in df_raw.columns:
         sub = str(col[1]).strip().lower()
         if sub in base_targets:
@@ -349,9 +362,8 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
     required = {"event_id", "date_raw", "surveyed_m2_raw"}
     missing = sorted(list(required - set(df.columns)))
     if missing:
-        raise ValueError(f"Data sheet is missing required column(s): {missing}")
+        raise ValueError(f"Data sheet missing required columns: {missing}")
 
-    # Drop summary rows
     df = df[df["event_id"].notna()].copy()
 
     df["event_id"] = df["event_id"].apply(normalize_event_id)
@@ -375,10 +387,10 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
 
     long_df["count_for_totals"] = pd.to_numeric(long_df["count_raw"], errors="coerce").fillna(0).astype(float)
 
-    # Site sheet (optional)
     site_df = None
     if "Site" in sheets:
         site_df = pd.read_excel(workbook_path, sheet_name="Site")
+
         if "Event ID" in site_df.columns:
             site_df["event_id"] = site_df["Event ID"].apply(normalize_event_id)
         else:
@@ -402,7 +414,6 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
         lambda x: f"unknown (event {x})" if x else "unknown"
     )
 
-    # events_df
     events_df = df[["event_id", "date_plot", "surveyed_m2"]].drop_duplicates().copy()
     if site_df is not None and "Site" in site_df.columns:
         events_df = events_df.merge(site_small, on="event_id", how="left")
@@ -413,72 +424,52 @@ def load_workbook_any(workbook_path: str, workbook_mtime: float):
     return mode, events_df, long_df, site_df, meta, extras
 
 
-# -----------------------------
-# Data quality checks (raw mode or cleaned mode fallback)
-# -----------------------------
-def run_data_quality_checks(events_df: pd.DataFrame, long_df: pd.DataFrame, site_df: pd.DataFrame | None):
-    issues = []
+# =============================
+# Quality checks
+# =============================
+def run_data_quality_checks(events_df: pd.DataFrame, long_df: pd.DataFrame, site_df: Optional[pd.DataFrame]):
+    issues: List[Dict[str, Any]] = []
 
     missing_event_id = events_df["event_id"].isna().sum()
     if missing_event_id > 0:
-        issues.append({
-            "name": "Missing Event ID",
-            "count": int(missing_event_id),
-            "sample": events_df[events_df["event_id"].isna()].head(50)
-        })
+        issues.append(
+            {"name": "Missing Event ID", "count": int(missing_event_id), "sample": events_df[events_df["event_id"].isna()].head(50)}
+        )
 
     dupes = events_df["event_id"][events_df["event_id"].notna()].duplicated().sum()
     if dupes > 0:
         d = events_df[events_df["event_id"].duplicated(keep=False)].sort_values("event_id").head(100)
-        issues.append({
-            "name": "Duplicate Event ID",
-            "count": int(dupes),
-            "sample": d
-        })
+        issues.append({"name": "Duplicate Event ID", "count": int(dupes), "sample": d})
 
     date_bad = events_df["date_plot"].isna().sum()
     if date_bad > 0:
-        issues.append({
-            "name": "Dates that did not parse",
-            "count": int(date_bad),
-            "sample": events_df[events_df["date_plot"].isna()].head(50)
-        })
+        issues.append({"name": "Dates that did not parse", "count": int(date_bad), "sample": events_df[events_df["date_plot"].isna()].head(50)})
 
     if "surveyed_m2" in events_df.columns:
         area_missing = events_df["surveyed_m2"].isna().sum()
         if area_missing > 0:
-            issues.append({
-                "name": "Missing surveyed m2",
-                "count": int(area_missing),
-                "sample": events_df[events_df["surveyed_m2"].isna()].head(50)
-            })
+            issues.append({"name": "Missing surveyed m2", "count": int(area_missing), "sample": events_df[events_df["surveyed_m2"].isna()].head(50)})
 
         area_nonpos = (events_df["surveyed_m2"].notna() & (events_df["surveyed_m2"] <= 0)).sum()
         if area_nonpos > 0:
-            issues.append({
-                "name": "Surveyed m2 is 0 or negative",
-                "count": int(area_nonpos),
-                "sample": events_df[events_df["surveyed_m2"].notna() & (events_df["surveyed_m2"] <= 0)].head(50)
-            })
+            issues.append(
+                {
+                    "name": "Surveyed m2 is 0 or negative",
+                    "count": int(area_nonpos),
+                    "sample": events_df[events_df["surveyed_m2"].notna() & (events_df["surveyed_m2"] <= 0)].head(50),
+                }
+            )
 
-    # negative counts (if any came through)
     if "count_raw" in long_df.columns:
         cnum = pd.to_numeric(long_df["count_raw"], errors="coerce")
+
         neg_counts = (cnum.notna() & (cnum < 0)).sum()
         if neg_counts > 0:
-            issues.append({
-                "name": "Negative trash counts",
-                "count": int(neg_counts),
-                "sample": long_df[cnum.notna() & (cnum < 0)].head(100)
-            })
+            issues.append({"name": "Negative trash counts", "count": int(neg_counts), "sample": long_df[cnum.notna() & (cnum < 0)].head(100)})
 
         nonint = (cnum.notna() & ((cnum % 1) != 0)).sum()
         if nonint > 0:
-            issues.append({
-                "name": "Trash counts that are not whole numbers",
-                "count": int(nonint),
-                "sample": long_df[cnum.notna() & ((cnum % 1) != 0)].head(100)
-            })
+            issues.append({"name": "Trash counts that are not whole numbers", "count": int(nonint), "sample": long_df[cnum.notna() & ((cnum % 1) != 0)].head(100)})
 
     if site_df is not None and "event_id" in site_df.columns:
         data_ids = set(events_df["event_id"].dropna().tolist())
@@ -488,53 +479,49 @@ def run_data_quality_checks(events_df: pd.DataFrame, long_df: pd.DataFrame, site
         missing_in_data = sorted(list(site_ids - data_ids))
 
         if missing_in_site:
-            issues.append({
-                "name": "Event IDs in Data but missing in Site",
-                "count": int(len(missing_in_site)),
-                "sample": pd.DataFrame({"event_id": missing_in_site[:100]})
-            })
+            issues.append({"name": "Event IDs in Data but missing in Site", "count": int(len(missing_in_site)), "sample": pd.DataFrame({"event_id": missing_in_site[:100]})})
 
         if missing_in_data:
-            issues.append({
-                "name": "Event IDs in Site but missing in Data",
-                "count": int(len(missing_in_data)),
-                "sample": pd.DataFrame({"event_id": missing_in_data[:100]})
-            })
+            issues.append({"name": "Event IDs in Site but missing in Data", "count": int(len(missing_in_data)), "sample": pd.DataFrame({"event_id": missing_in_data[:100]})})
 
         if "Site" in site_df.columns:
             site_blank = site_df["Site"].isna().sum()
             if site_blank > 0:
-                issues.append({
-                    "name": "Missing Site values in Site sheet",
-                    "count": int(site_blank),
-                    "sample": site_df[site_df["Site"].isna()].head(100)
-                })
+                issues.append({"name": "Missing Site values in Site sheet", "count": int(site_blank), "sample": site_df[site_df["Site"].isna()].head(100)})
 
         for col in ["Northing", "Westing"]:
             if col in site_df.columns:
                 bad = site_df[col].apply(looks_like_timedelta_text).sum()
                 if bad > 0:
-                    issues.append({
-                        "name": f"{col} values that look like time-like values",
-                        "count": int(bad),
-                        "sample": site_df[site_df[col].apply(looks_like_timedelta_text)][["event_id", col]].head(100)
-                    })
+                    issues.append(
+                        {
+                            "name": f"{col} values that look time-like",
+                            "count": int(bad),
+                            "sample": site_df[site_df[col].apply(looks_like_timedelta_text)][["event_id", col]].head(100),
+                        }
+                    )
 
     return issues
 
 
-# -----------------------------
-# Add Entry logic (same idea as your older app)
-# -----------------------------
+# =============================
+# Add Entry logic
+# =============================
 def yymmdd_int(d: date) -> int:
     return int(d.strftime("%y%m%d"))
 
 
-def try_append_to_master(workbook_path: str, event_id: str, d: date, surveyed_m2: float, site_name: str | None,
-                         counts_rows: pd.DataFrame):
+def try_append_to_master(
+    workbook_path: str,
+    event_id: str,
+    d: date,
+    surveyed_m2: float,
+    site_name: Optional[str],
+    counts_rows: pd.DataFrame,
+):
     wb = load_workbook(workbook_path)
     if "Data" not in wb.sheetnames:
-        raise ValueError("This workbook has no 'Data' sheet. Add Entry only works on the master raw workbook.")
+        raise ValueError("Workbook has no 'Data' sheet. Add Entry works on a raw master workbook.")
 
     ws_data = wb["Data"]
 
@@ -542,7 +529,7 @@ def try_append_to_master(workbook_path: str, event_id: str, d: date, surveyed_m2
     header_top = [ws_data.cell(row=1, column=c).value for c in range(1, max_col + 1)]
     header_sub = [ws_data.cell(row=2, column=c).value for c in range(1, max_col + 1)]
 
-    col_keys = []
+    col_keys: List[Tuple[str, str]] = []
     for top, sub in zip(header_top, header_sub):
         top_s = "" if top is None else str(top).strip()
         sub_s = "" if sub is None else str(sub).strip()
@@ -559,7 +546,7 @@ def try_append_to_master(workbook_path: str, event_id: str, d: date, surveyed_m2
     counts_rows["trash_item"] = counts_rows["trash_item"].astype(str)
     counts_rows["count"] = pd.to_numeric(counts_rows["count"], errors="coerce").fillna(0)
 
-    user_map = {}
+    user_map: Dict[Tuple[str, str], float] = {}
     for _, r in counts_rows.iterrows():
         g = r["trash_group"].strip()
         i = r["trash_item"].strip()
@@ -569,7 +556,7 @@ def try_append_to_master(workbook_path: str, event_id: str, d: date, surveyed_m2
 
     total_items = float(np.sum(list(user_map.values()))) if user_map else 0.0
 
-    row_values = []
+    row_values: List[Any] = []
     for (g, i) in col_keys:
         if g == "__EVENT__":
             if i.lower() == "event id":
@@ -613,28 +600,28 @@ def try_append_to_master(workbook_path: str, event_id: str, d: date, surveyed_m2
 def write_to_staging(staging_path: str, event_row: dict, counts_rows: pd.DataFrame):
     with pd.ExcelWriter(staging_path, engine="openpyxl", mode="a" if os.path.exists(staging_path) else "w") as writer:
         ev = pd.DataFrame([event_row])
-        ev.to_excel(writer, sheet_name="New_Events", index=False,
-                    header=not ("New_Events" in writer.book.sheetnames))
+        ev.to_excel(writer, sheet_name="New_Events", index=False, header=not ("New_Events" in writer.book.sheetnames))
 
         cr = counts_rows.copy()
         cr["event_id"] = event_row["event_id"]
-        cr.to_excel(writer, sheet_name="New_Counts", index=False,
-                    header=not ("New_Counts" in writer.book.sheetnames))
+        cr.to_excel(writer, sheet_name="New_Counts", index=False, header=not ("New_Counts" in writer.book.sheetnames))
 
 
-# -----------------------------
-# Cleaning runner (calls your big script)
-# -----------------------------
-def run_cleaning_script():
-    if not os.path.exists(CLEAN_SCRIPT):
-        return False, f"Missing {CLEAN_SCRIPT}. Put your cleaning code in a file named {CLEAN_SCRIPT} next to app.py."
-
+# =============================
+# Cleaning runner
+# =============================
+def run_cleaning_module() -> Tuple[bool, str]:
+    """
+    Runs scripts/clean_trash_db.py as a module:
+      python -m scripts.clean_trash_db
+    Uses sys.executable so it runs in the same venv.
+    """
     try:
         result = subprocess.run(
-            ["python", CLEAN_SCRIPT],
+            [sys.executable, "-m", SETTINGS.clean_module],
             capture_output=True,
             text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=str(Path(__file__).resolve().parent),
         )
         ok = (result.returncode == 0)
         out = (result.stdout or "") + "\n" + (result.stderr or "")
@@ -643,12 +630,14 @@ def run_cleaning_script():
         return False, str(e)
 
 
-# -----------------------------
-# Sidebar
-# -----------------------------
-inject_css()
-st_sidebar_image(LOGO_URL)
+# =============================
+# Page rendering
+# =============================
+inject_css_times_new_roman()
+st_sidebar_logo(LOGO_URL)
 st.sidebar.markdown("### Trash Dashboard")
+
+create_sample_if_missing()
 
 candidates = find_candidate_workbooks()
 
@@ -657,8 +646,7 @@ manual_path = st.sidebar.text_input("Or paste a full file path", value="")
 prefer_cleaned = st.sidebar.checkbox("Prefer cleaned workbook if available", value=True)
 
 if "workbook_path" not in st.session_state:
-    # default: cleaned if it exists, else raw
-    default_path = OUTPUT_XLSX if (prefer_cleaned and os.path.exists(OUTPUT_XLSX)) else INPUT_XLSX
+    default_path = SETTINGS.output_xlsx if (prefer_cleaned and os.path.exists(SETTINGS.output_xlsx)) else SETTINGS.input_xlsx
     if not os.path.exists(default_path) and candidates:
         default_path = candidates[0]
     st.session_state["workbook_path"] = default_path if default_path else ""
@@ -675,22 +663,21 @@ if uploaded is not None:
     temp_uploaded_path = temp_path
 elif manual_path.strip() != "":
     workbook_path = manual_path.strip()
-elif prefer_cleaned and os.path.exists(OUTPUT_XLSX):
-    workbook_path = OUTPUT_XLSX
+elif prefer_cleaned and os.path.exists(SETTINGS.output_xlsx):
+    workbook_path = SETTINGS.output_xlsx
 elif candidates:
-    pick = st.sidebar.selectbox("Workbook", candidates, index=0)
-    workbook_path = pick
+    workbook_path = st.sidebar.selectbox("Workbook", candidates, index=0)
 
 st.session_state["workbook_path"] = workbook_path
 
 page = st.sidebar.radio(
     "Pages",
     ["Dashboard", "Figures", "Map", "Add Entry", "Data Quality Review", "Needs Fixes", "Cleaning", "Export"],
-    index=0
+    index=0,
 )
 
 if not workbook_path or not os.path.exists(workbook_path):
-    st.error("No workbook found. Fix the path in the sidebar.")
+    st.error("No workbook found. Use the sidebar to upload a file or set a valid path.")
     st.stop()
 
 mtime = get_mtime(workbook_path)
@@ -701,17 +688,9 @@ except Exception as e:
     st.error(f"Could not load workbook: {e}")
     st.stop()
 
-
-# -----------------------------
-# Header info (top of every page)
-# -----------------------------
 st.caption(f"Loaded: {workbook_path}")
 st.caption(f"Mode: {mode} | Last modified: {datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')}")
 
-
-# -----------------------------
-# Pages
-# -----------------------------
 if page == "Dashboard":
     st.title("Trash Dashboard")
 
@@ -870,10 +849,9 @@ elif page == "Map":
 
     m = long_df.copy()
     if ("lat_plot" not in m.columns) or ("lon_plot" not in m.columns):
-        st.error("Missing lat_plot or lon_plot. Run cleaning or load a workbook that has coordinates.")
+        st.error("Missing lat_plot or lon_plot. Run Cleaning or load a workbook that has coordinates.")
         st.stop()
 
-    # One row per event for map
     ev = (
         m.groupby(["event_id", "site_label_plot", "date_plot", "lat_plot", "lon_plot"], dropna=False)["count_for_totals"]
         .sum()
@@ -882,10 +860,10 @@ elif page == "Map":
     ev = ev[ev["lat_plot"].notna() & ev["lon_plot"].notna()].copy()
 
     if len(ev) == 0:
-        st.warning("No events have usable coordinates. This is expected for events where coords are blanked out.")
+        st.warning("No events have usable coordinates.")
         st.stop()
 
-    fig = px.scatter_map(
+    fig = px.scatter_mapbox(
         ev,
         lat="lat_plot",
         lon="lon_plot",
@@ -894,20 +872,18 @@ elif page == "Map":
         zoom=7,
         height=700,
     )
-    fig.update_layout(map_style="open-street-map")
+    fig.update_layout(mapbox_style="open-street-map")
     st_chart(fig)
 
 elif page == "Data Quality Review":
     st.title("Data Quality Review")
 
-    # If cleaned workbook has QC_Report, show it first
     if extras.get("qc_report") is not None and len(extras["qc_report"]) > 0:
         st.subheader("QC_Report (from workbook)")
         st_df(extras["qc_report"], height=420)
         st.divider()
 
-    st.write("These checks are computed from the workbook that is loaded right now.")
-
+    st.write("These checks are computed from the workbook loaded right now.")
     issues = run_data_quality_checks(events_df, long_df, site_df)
 
     if not issues:
@@ -927,21 +903,20 @@ elif page == "Needs Fixes":
     elif len(nf) == 0:
         st.success("Needs_Fixes is empty.")
     else:
-        st.warning("Needs_Fixes is not empty. These events still need field note overrides.")
+        st.warning("Needs_Fixes is not empty.")
         st_df(nf, height=520)
         if "event_id" in nf.columns:
-            ids = nf["event_id"].dropna().astype(int).tolist()
-            st.write(f"Event IDs: {ids}")
+            ids = nf["event_id"].dropna().astype(str).tolist()
+            st.write(f"Event IDs: {ids[:200]}")
         st.write("Overrides CSV path:")
-        st.code(OVERRIDES_CSV)
+        st.code(SETTINGS.overrides_csv)
 
 elif page == "Add Entry":
     st.title("Add Entry")
 
-    st.write("This page appends to a master workbook that has a 'Data' sheet (raw format).")
+    st.write("This page appends to a raw master workbook that has a 'Data' sheet.")
     st.write("If the file is locked, it writes to a staging file instead.")
 
-    # Build choices from current loaded long_df
     group_choices = sorted(long_df["trash_group"].dropna().unique().tolist()) if "trash_group" in long_df.columns else ["Ungrouped"]
     item_choices = sorted(long_df["trash_item"].dropna().unique().tolist()) if "trash_item" in long_df.columns else [""]
 
@@ -965,7 +940,6 @@ elif page == "Add Entry":
             }]
         )
 
-        # data_editor supports dynamic rows
         try:
             counts_rows = st.data_editor(
                 starter,
@@ -978,11 +952,7 @@ elif page == "Add Entry":
                 },
             )
         except TypeError:
-            counts_rows = st.data_editor(
-                starter,
-                num_rows="dynamic",
-                use_container_width=True,
-            )
+            counts_rows = st.data_editor(starter, num_rows="dynamic", use_container_width=True)
 
         block_if_duplicate = st.checkbox("Block duplicate Event ID", value=True)
         submit = st.form_submit_button("Save")
@@ -999,7 +969,7 @@ elif page == "Add Entry":
             st.stop()
 
         if surveyed_m2 is None or surveyed_m2 <= 0:
-            st.warning("Surveyed m2 is 0 or less. Items per m2 math will be blank for this event.")
+            st.warning("Surveyed m2 is 0 or less. Items per m2 will be blank for this event.")
 
         counts_df = pd.DataFrame(counts_rows)
         if len(counts_df) == 0:
@@ -1008,8 +978,7 @@ elif page == "Add Entry":
         counts_df["count"] = pd.to_numeric(counts_df["count"], errors="coerce").fillna(0)
         counts_df = counts_df[(counts_df["trash_group"].notna()) & (counts_df["trash_item"].notna())]
 
-        # Choose target workbook for writing
-        target_path = st.session_state.get("master_write_path", INPUT_XLSX)
+        target_path = st.session_state.get("master_write_path", SETTINGS.input_xlsx)
         target_path = st.text_input("Master workbook path to write into", value=target_path)
         st.session_state["master_write_path"] = target_path
 
@@ -1029,7 +998,7 @@ elif page == "Add Entry":
             st.success("Saved to the master workbook.")
             st.cache_data.clear()
         except Exception as e:
-            staging_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "staging_new_entries.xlsx")
+            staging_path = str(Path(__file__).resolve().parent / "staging_new_entries.xlsx")
             event_row = {
                 "event_id": event_id_norm,
                 "date": entry_date.isoformat(),
@@ -1049,43 +1018,33 @@ elif page == "Add Entry":
 elif page == "Cleaning":
     st.title("Cleaning")
 
-    st.write("This runs your cleaning script and rebuilds the cleaned workbook.")
-    st.write("It is the easiest way to refresh Clean_Long, Events_clean, QC_Report, Needs_Fixes, and plot columns.")
+    st.write("This runs the cleaning script and writes a cleaned workbook with Clean_Long and related sheets.")
+    st.write("It runs: python -m scripts.clean_trash_db")
 
-    st.write("Expected files:")
-    st.code(f"Input:  {INPUT_XLSX}\nOutput: {OUTPUT_XLSX}\nOverrides: {OVERRIDES_CSV}\nScript: {os.path.join(os.path.dirname(os.path.abspath(__file__)), CLEAN_SCRIPT)}")
+    st.code(
+        "\n".join(
+            [
+                f"Input:    {SETTINGS.input_xlsx}",
+                f"Output:   {SETTINGS.output_xlsx}",
+                f"Overrides:{SETTINGS.overrides_csv}",
+                f"Module:   {SETTINGS.clean_module}",
+            ]
+        )
+    )
 
     run_now = st.button("Run cleaning now", type="primary")
-
     if run_now:
         with st.spinner("Running cleaning..."):
-            ok, output = run_cleaning_script()
+            ok, output = run_cleaning_module()
+
         if ok:
             st.success("Cleaning finished.")
             if output:
                 st.code(output)
             st.cache_data.clear()
 
-            # Auto switch to cleaned workbook if it exists
-            if os.path.exists(OUTPUT_XLSX):
-                st.session_state["workbook_path"] = OUTPUT_XLSX
-                st.info("Switched workbook to the cleaned output. Go to Figures or Dashboard.")
+            if os.path.exists(SETTINGS.output_xlsx):
+                st.session_state["workbook_path"] = SETTINGS.output_xlsx
+                st.info("Switched workbook to the cleaned output.")
         else:
-            st.error("Cleaning failed.")
-            st.code(output)
-
-elif page == "Export":
-    st.title("Export")
-
-    st.write("Download the long-format table that the charts use.")
-
-    cols = [c for c in ["event_id", "date_plot", "site_label_plot", "trash_group", "trash_item", "count_for_totals", "surveyed_m2"] if c in long_df.columns]
-    out = long_df[cols].copy()
-
-    csv = out.to_csv(index=False).encode("utf-8")
-    st.download_button("Download CSV", data=csv, file_name="trash_export.csv", mime="text/csv")
-
-
-# temp upload cleanup (do nothing, streamlit reruns a lot)
-if temp_uploaded_path and os.path.exists(temp_uploaded_path):
-    pass
+            st.error("Cleaning failed
