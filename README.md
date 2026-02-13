@@ -1,55 +1,47 @@
-# Trash Dashboard (Streamlit)  
+# Trash Dashboard (Streamlit)
+
 Interactive analytics, mapping, QA checks, and controlled data entry for the Sonoran Institute trash survey database.
 
-This repository contains a production-style Streamlit application that supports two workflows:
+This repo contains a Streamlit app built for two workflows:
 
-1) **Analytics on a cleaned workbook** (recommended): fast dashboards and figures built from standardized long-format tables.  
-2) **Fallback support for a raw master workbook**: parse the original wide “Data” sheet format and still produce the same figures.
+1. Cleaned workbook analytics (recommended): fast dashboards and figures from standardized long-format tables.
+2. Raw master workbook support (fallback): parses the original wide “Data” sheet and produces the same figures.
 
-The app is designed to reduce analysis errors from inconsistent Excel structure, missing fields, and mixed data types by:
-- building “plot-safe” columns (dates, coordinates, labels) when missing
+The goal is to reduce analysis mistakes caused by inconsistent Excel structure, missing fields, and mixed data types by:
+- creating plot-safe columns (dates, coordinates, labels) when missing
 - standardizing counts into one numeric column used by charts
-- surfacing known data quality problems and remaining “Needs Fixes” events
-- optionally appending new entries to the master workbook (or staging when locked)
+- surfacing known QA problems and remaining “Needs Fixes” events
+- optionally appending new entries to the master workbook (or writing to staging when the file is locked)
 
----
+## Highlights
 
-## Highlights (what a recruiter should notice)
+Dual-mode ingestion  
+Automatically detects whether the workbook is cleaned (`Clean_Long`, `Events_clean`) or raw (`Data`) and routes to the correct parsing path.
 
-- **Reliable dual-mode ingestion**  
-  Automatically detects whether the loaded workbook is cleaned (`Clean_Long`, `Events_clean`) or raw (`Data` sheet) and routes to the correct parsing pipeline.
+Plot-ready schema stabilization  
+Prevents common dashboard failures (KeyError, date parse failures, mixed coordinate formats) by deriving:
+- `date_plot`
+- `lat_plot`, `lon_plot`
+- `site_label_plot`
+- `count_for_totals`
 
-- **Schema stabilization for plotting**  
-  Prevents common dashboard failures (KeyError, non-parsing dates, mixed coordinate types) by deriving:
-  - `date_plot`
-  - `lat_plot`, `lon_plot`
-  - `site_label_plot`
-  - `count_for_totals`
+Built-in data quality review  
+Displays workbook QA sheets when present (`QC_Report`, `Needs_Fixes`) and runs computed checks in-app (duplicate IDs, missing survey area, parse failures, and more).
 
-- **Data quality reporting built-in**  
-  Shows workbook-generated QA (when present) and runs computed checks in-app (duplicates, parse failures, missing survey area, etc.).
+Map visualization  
+Interactive Plotly map with hover details (event ID, date, total items) when coordinates exist.
 
-- **Map visualization**  
-  Interactive site map (Plotly) with event hover data when coordinates exist.
+Controlled data entry  
+Adds new events to the raw master workbook with correct header alignment. If Excel locks the file, the app writes to a staging workbook instead.
 
-- **Controlled data entry for field updates**  
-  Adds new events to the raw master workbook with correct header alignment, and automatically writes to a staging file when Excel locks the master.
+One-click cleaning refresh  
+Runs a separate pipeline script (`clean_trash_db.py`) so users can rebuild the cleaned output without leaving the UI.
 
-- **One-click pipeline refresh**  
-  Runs a separate cleaning script (`clean_trash_db.py`) so analysts can regenerate the cleaned workbook without leaving the UI.
+## Demo (recommended)
 
----
+Add a few screenshots or a short GIF. This makes the repo much easier to judge quickly.
 
-## Demo (optional but recommended)
-
-If you want this to look “portfolio-ready”, add a screenshot or short GIF of:
-- Dashboard filters + monthly totals
-- Top items figure
-- Map page
-- Needs Fixes / QC page
-
-Place images in `docs/` and link them here:
-
+Suggested files:
 ```text
 docs/
   dashboard.png
